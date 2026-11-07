@@ -251,6 +251,11 @@ OSXKeyState::mapKeyFromEvent(KeyIDs& ids,
 
     // get keyboard info
     TISInputSourceRef currentKeyboardLayout = TISCopyCurrentKeyboardLayoutInputSource();
+    if (currentKeyboardLayout == nullptr && !m_groups.empty()) {
+        // No conventional keyboard layout is enabled; use the layout the key
+        // map was built from (see getGroups()).
+        currentKeyboardLayout = m_groups[0];
+    }
 
     if (currentKeyboardLayout == nullptr) {
         return kKeyNone;
@@ -394,6 +399,11 @@ OSXKeyState::pollActiveModifiers() const
 std::int32_t OSXKeyState::pollActiveGroup() const
 {
     TISInputSourceRef keyboardLayout = TISCopyCurrentKeyboardLayoutInputSource();
+    if (keyboardLayout == nullptr) {
+        LOG_DEBUG("can't get the active group, use the first group instead");
+        return 0;
+    }
+
     CFDataRef id = (CFDataRef)TISGetInputSourceProperty(
                         keyboardLayout, kTISPropertyInputSourceID);
 
@@ -843,31 +853,50 @@ void OSXKeyState::handleModifierKey(const EventTarget* target, std::uint32_t vir
 bool
 OSXKeyState::getGroups(GroupList& groups) const
 {
-    CFIndex n;
     bool gotLayouts = false;
 
-    // get number of layouts
+    // get enabled keyboard input sources
     CFStringRef keys[] = { kTISPropertyInputSourceCategory };
     CFStringRef values[] = { kTISCategoryKeyboardInputSource };
     CFDictionaryRef dict = CFDictionaryCreate(nullptr, (const void **)keys, (const void **)values, 1, nullptr, nullptr);
     CFArrayRef kbds = TISCreateInputSourceList(dict, false);
-    n = CFArrayGetCount(kbds);
-    gotLayouts = (n != 0);
-
-    if (!gotLayouts) {
+    CFRelease(dict);
+    if (kbds == nullptr) {
         LOG_DEBUG1("can't get keyboard layouts");
         return false;
     }
 
-    // get each layout
+    // Only input sources that provide a keyboard layout can be used to build
+    // a key map.  Third-party input methods (e.g. Sogou) are reported as
+    // keyboard input sources but carry no layout data, so they must be skipped.
     groups.clear();
-    for (CFIndex i = 0; i < n; ++i) {
-        bool addToGroups = true;
+    for (CFIndex i = 0, n = CFArrayGetCount(kbds); i < n; ++i) {
         TISInputSourceRef keyboardLayout =
             (TISInputSourceRef)CFArrayGetValueAtIndex(kbds, i);
-
-        if (addToGroups)
+        if (TISGetInputSourceProperty(keyboardLayout,
+                    kTISPropertyUnicodeKeyLayoutData) != nullptr) {
             groups.push_back(keyboardLayout);
+            gotLayouts = true;
+        }
+    }
+
+    // If no conventional keyboard layout is enabled, for example when macOS
+    // only has a third-party input method, fall back to the current keyboard
+    // layout.  macOS keeps one internally for input methods even though it
+    // isn't listed as an enabled input source.
+    if (!gotLayouts) {
+        TISInputSourceRef currentLayout = TISCopyCurrentKeyboardLayoutInputSource();
+        if (currentLayout != nullptr &&
+            TISGetInputSourceProperty(currentLayout,
+                    kTISPropertyUnicodeKeyLayoutData) != nullptr) {
+            groups.push_back(currentLayout);
+            gotLayouts = true;
+        }
+    }
+
+    if (!gotLayouts) {
+        LOG_DEBUG1("can't get keyboard layouts");
+        return false;
     }
     return true;
 }
